@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# Trained models (large binaries)
+trained_models/*.joblib
+
+# Logs
+pipeline_logs/
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Node / Frontend (handled by frontend/.gitignore too)
+node_modules/
+frontend/.next/
+frontend/out/
+
+# Large data files
+*.csv
+!cleaned_split_data/*.csv
