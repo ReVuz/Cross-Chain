@@ -1,203 +1,194 @@
-# Cross-Chain Bridge Cost Prediction System
+# Cross-Chain Bridge Cost Prediction
 
-End-to-end ML platform: data enrichment → EDA → per-bridge models → backend API (live quotes + predictions) → frontend → real-time retraining pipeline → deployment.
+A full-stack ML system that fetches live bridge quotes, predicts transaction costs using per-bridge models, and lets users compare fees across five major cross-chain protocols.
 
-## Current State
+## Supported Bridges
 
-| Item | Status |
-|------|--------|
-| Raw dataset | [all_ccc_sampled.csv](file:///home/hp/Documents/web3/all_ccc_sampled.csv) — 10K rows, 73 cols, May–Dec 2024 |
-| Cleaned data | `cleaned_split_data/` — per-bridge CSVs with enriched features |
-| Bridges | Across (3,411), Stargate Bus (3,130), OFT (2,898), CCTP (519), CCIP (11) |
-| Target | `user_cost` (USD) — decomposed into gas + spread + operator |
-| ML Models | **Trained** — Stargate OFT R²=0.78, CCTP R²=0.71, Across R²=0.59, Bus R²=0.38, CCIP=median |
-| Frontend | Next.js 16, wired to `/quotes` and `/predict` — **working** |
-| Backend | FastAPI — **working** with live quotes (Across + LiFi) + ML predictions |
-| Deployment | Render (Docker) + Vercel configs ready |
+| Protocol | Architecture | Model |
+|----------|-------------|-------|
+| **Across** | Optimistic relayer — relayers front liquidity, reimbursed on source chain | LightGBM (R²=0.64) |
+| **Stargate V2 (OFT)** | LayerZero Omnichain Fungible Token — individual cross-chain transfers | XGBoost (R²=0.47) |
+| **Stargate V2 (Bus)** | LayerZero batched mode — multiple transfers in one cross-chain message | XGBoost (R²=0.38) |
+| **CCTP** | Circle's native USDC burn-and-mint — no wrapped tokens | XGBoost |
+| **CCIP** | Chainlink oracle-secured bridge — institutional-grade transfers | Median fallback (11 samples) |
 
----
+## Architecture
 
-## User Review Required
+```
+┌─────────────────────┐      ┌──────────────────────────────────┐
+│   Next.js Frontend  │◄────►│        FastAPI Backend           │
+│                     │      │                                  │
+│  • Bridge Comparator│      │  GET  /quotes    ← live fees     │
+│  • Predictions View │      │  GET  /predict   ← ML inference  │
+│  • Training Data    │      │  GET  /eda       ← dataset stats │
+│    Dashboard        │      │  GET  /data/*    ← recent rows   │
+│                     │      │  GET  /model/*   ← model info    │
+└─────────────────────┘      │  POST /model/retrain             │
+                             │                                  │
+                             │  bridge_apis.py  → Across API    │
+                             │                  → LiFi (CCTP,   │
+                             │                    Stargate,CCIP)│
+                             │  predictor.py    → joblib models │
+                             │  train_models.py → XGBoost/LGBM  │
+                             └──────────────────────────────────┘
+```
 
-> [!IMPORTANT]
-> **Enriching the dataset with real gas data**: We'll use the **Etherscan Gas Oracle API** (free, 5 req/s) to back-fill hourly gas prices for each transaction's timestamp. This populates `dune_hourly_gas_gwei`, `gas_1h_lag`, `gas_6h_avg`, `gas_24h_avg`, and `gas_volatility_24h` with real values. ETH price data will come from **CoinGecko's free API**.
+## Project Structure
 
-> [!IMPORTANT]
-> **Alternative ML models**: If XGBoost R² < 0.6, we'll try **LightGBM** and **LSTM**. See [Research Papers](#research-papers) section below.
+```
+web3/
+├── backend/
+│   ├── main.py              # FastAPI app — all endpoints
+│   ├── bridge_apis.py       # Live quote fetching (Across + LiFi aggregator)
+│   ├── predictor.py         # Model loading and inference
+│   ├── train_models.py      # Per-bridge training pipeline
+│   ├── data_pipeline.py     # Live data collection to CSV
+│   ├── fetch_recent_data.py # Bulk historical data fetcher
+│   ├── models/              # Trained model artifacts (.joblib + meta.json)
+│   ├── requirements.txt
+│   └── Dockerfile
+├── frontend/
+│   └── app/
+│       ├── page.js          # Main comparison page
+│       ├── data/page.js     # Training data dashboard
+│       ├── globals.css
+│       └── layout.js
+├── cleaned_split_data/      # Per-bridge cleaned CSVs for training
+├── all_ccc_sampled.csv      # Raw dataset (10K rows, May–Dec 2024)
+├── Dataset_Cleaned (2).ipynb # EDA notebook
+├── render.yaml              # Render deployment config
+└── .env.example
+```
 
-> [!WARNING]
-> **CCIP (13 samples)**: Median-based fallback — insufficient data for ML training.
+## Quick Start
 
-> [!WARNING]
-> **Deployment**: Backend on **Render** (free Docker), frontend on **Vercel** (free). Render free tier spins down after inactivity (~50s cold start). We can consider **Railway** if spin-down is unacceptable. ML model is deployed with the backend (serialized via joblib).
+### Prerequisites
 
----
+- Python 3.10+
+- Node.js 18+
 
-## Proposed Changes
+### Backend
 
-### Phase 1: Data Enrichment
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
 
-#### [NEW] [enrich_dataset.py](file:///home/hp/Documents/web3/backend/enrich_dataset.py)
+# Train models (required on first run)
+python -m backend.train_models
 
-Enriches [all_ccc_sampled.csv](file:///home/hp/Documents/web3/all_ccc_sampled.csv) with **real-world** gas and ETH price data:
+# Start API server
+uvicorn backend.main:app --reload --port 8000
+```
 
-1. **Gas prices** — Etherscan gas oracle historical data (`gastracker` module) → populates:
-   - `dune_hourly_gas_gwei`, `gas_1h_lag`, `gas_6h_avg`, `gas_24h_avg`, `gas_volatility_24h`
-2. **ETH price** — CoinGecko `/coins/ethereum/market_chart/range` → populates:
-   - `eth_price_at_src`, `eth_price_change_1h`, `eth_price_24h_avg`
-3. **Temporal features** from `src_timestamp`:
-   - `hour_of_day`, `day_of_week`, `is_weekend`, `month`
-4. **Route + token encoding**:
-   - `route` = `src_blockchain→dst_blockchain`
-   - `bridge_hourly_volume` = count of txs per bridge per hour window
-5. Output: `all_ccc_enriched.csv`
+### Frontend
 
----
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-### Phase 2: EDA (added to notebook)
+The frontend expects the backend at `http://localhost:8000` by default. Set `NEXT_PUBLIC_API_URL` in `frontend/.env.local` to override.
 
-#### [MODIFY] [Dataset_Cleaned (2).ipynb](file:///home/hp/Documents/web3/Dataset_Cleaned%20(2).ipynb)
+### Environment Variables
 
-New cells appended per bridge:
+Copy `.env.example` to `.env` and fill in:
 
-| Analysis | Details |
-|----------|---------|
-| Cost distributions | Histograms + box plots of `user_cost` per bridge |
-| Fee decomposition | Stacked bar: gas vs spread vs operator per bridge |
-| Time patterns | Hour-of-day and day-of-week cost heatmaps |
-| Route analysis | Top 10 routes by volume and average cost |
-| Correlation matrix | Feature vs `user_cost` correlations |
-| Outlier analysis | IQR-based detection, before/after cleaning stats |
-| Amount vs cost | Scatter plots with regression lines |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ETHERSCAN_API_KEY` | No | Etherscan Gas Oracle — falls back to defaults |
+| `CACHE_TTL_SECONDS` | No | Quote cache TTL (default: 30s) |
+| `NEXT_PUBLIC_API_URL` | For prod | Backend URL for the frontend |
 
----
+## ML Pipeline
 
-### Phase 3: Prediction Models
+### Features
 
-#### [NEW] [train_models.py](file:///home/hp/Documents/web3/backend/train_models.py)
+Each model uses 20 features including:
 
-Per-bridge model training pipeline:
+- **Transaction**: `amount_usd`, `src_symbol`, `route`
+- **Market**: `dune_hourly_gas_gwei`, `eth_price_at_src`, gas lag/avg/volatility
+- **Temporal**: `hour_of_day`, `day_of_week`, `is_weekend`, `month`
+- **Engineered**: `log_amount`, `amount_x_gas`, `hour_sin`, `hour_cos`
 
-- **Target**: `log1p(user_cost)` — handles skewed distribution
-- **Primary model**: XGBoost (tuned per bridge)
-- **Fallback models**: LightGBM, Random Forest
-- **Features**: `amount_usd`, `route_encoded`, `src_symbol_encoded`, `hour_of_day`, `day_of_week`, `is_weekend`, `month`, `dune_hourly_gas_gwei`, `gas_1h_lag`, `gas_6h_avg`, `gas_24h_avg`, `gas_volatility_24h`, `eth_price_at_src`, `eth_price_change_1h`, `bridge_hourly_volume`, `latency`
+### Training
+
+- **Target**: `log1p(user_cost)` to handle skewed fee distributions
 - **Split**: Time-based 80/20 (no future leakage)
-- **Evaluation**: MAE, RMSE, R² per bridge; compare XGBoost vs LightGBM
-- **Output**: `backend/models/{bridge}_model.joblib` + `{bridge}_meta.json`
+- **Outlier handling**: Fees capped at 99th percentile per bridge
+- **Evaluation**: MAE and R² on held-out test set; best of XGBoost vs LightGBM is saved
 
----
+### Data Collection
 
-### Phase 4: FastAPI Backend
+```bash
+# Fetch recent real transactions (Across) + market quotes (LiFi)
+python -m backend.fetch_recent_data
 
-#### [NEW] [main.py](file:///home/hp/Documents/web3/backend/main.py)
+# Fetch only Across deposits
+python -m backend.fetch_recent_data across
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /quotes` | Live bridge quotes (fee + time + breakdown) |
-| `GET /predict` | ML predictions per bridge with confidence |
-| `GET /eda` | Pre-computed EDA stats |
-| `POST /retrain` | Trigger model retraining with new data |
+# Fetch only LiFi quotes (CCTP, Stargate, CCIP)
+python -m backend.fetch_recent_data lifi
 
-#### [NEW] [bridge_apis.py](file:///home/hp/Documents/web3/backend/bridge_apis.py)
-
-Live quote fetching (verified working ✅):
-
-| Bridge | Source | Status |
-|--------|--------|--------|
-| **Across** | `https://app.across.to/api/suggested-fees` | ✅ Working — returns LP/relayer/gas fee breakdown |
-| **Stargate** | Stargate V2 API (`mainnet.stargate-api.com`) + on-chain `quoteOFT()`/`quoteSend()` | ✅ Metadata working, quotes via RPC |
-| **CCTP** | LiFi aggregator API (`li.quest/v1/quote`) | ✅ Working via LiFi |
-| **CCIP** | On-chain `getFee()` via RPC | ⚠️ On-chain only |
-
-#### [NEW] [predictor.py](file:///home/hp/Documents/web3/backend/predictor.py)
-
-Model loading, prediction, confidence scoring, fee decomposition.
-
----
-
-### Phase 5: Real-Time Data Pipeline
-
-#### [NEW] [data_pipeline.py](file:///home/hp/Documents/web3/backend/data_pipeline.py)
-
-Continuous data fetching + model retraining pipeline:
-
-```
-[Dune Analytics API] ─── Query bridge tx data ───┐
-[Etherscan Gas Oracle] ─── Current gas prices ────┤──> Clean → Enrich → Append to CSV → Retrain
-[CoinGecko API] ─── ETH price data ──────────────┘
+# Retrain after new data
+python -m backend.train_models
 ```
 
-1. **Fetch new transactions** from Dune Analytics (SQL queries for each bridge)
-2. **Enrich** with gas + ETH price data
-3. **Append** to `all_ccc_enriched.csv`
-4. **Retrain** models if >100 new rows accumulated
-5. **Schedule**: Runs daily via cron or on-demand via `/retrain` endpoint
+## API Reference
 
----
+All endpoints accept query parameters.
 
-### Phase 6: Frontend Updates
+| Endpoint | Method | Parameters | Description |
+|----------|--------|------------|-------------|
+| `/quotes` | GET | `source_chain`, `dest_chain`, `token`, `amount` | Live quotes from bridge APIs |
+| `/predict` | GET | `source_chain`, `dest_chain`, `token`, `amount` | ML cost predictions per bridge |
+| `/eda` | GET | — | Dataset statistics and distributions |
+| `/data/recent` | GET | `bridge`, `limit` | Recent data rows (live + seed) |
+| `/data/stats` | GET | — | Per-bridge row counts and date ranges |
+| `/model/status` | GET | — | Model performance metrics |
+| `/model/retrain` | POST | — | Trigger model retraining |
 
-#### [MODIFY] [page.js](file:///home/hp/Documents/web3/frontend/app/page.js)
+### Example
 
-- EDA visualizations section (dynamic charts from `/eda` endpoint)
-- Enhanced prediction panel with fee decomposition (gas vs spread vs operator)
-- "Predicted vs Live" comparison view
-- Model info badges (last trained, accuracy, sample count)
+```bash
+# Live quotes: 1000 USDC from Ethereum to Arbitrum
+curl "http://localhost:8000/quotes?source_chain=Ethereum&dest_chain=Arbitrum&token=USDC&amount=1000000000"
 
-#### [MODIFY] [globals.css](file:///home/hp/Documents/web3/frontend/app/globals.css)
+# ML predictions for the same transfer
+curl "http://localhost:8000/predict?source_chain=Ethereum&dest_chain=Arbitrum&token=USDC&amount=1000000000"
+```
 
-- EDA chart styles, enhanced prediction cards
+## Deployment
 
----
+### Backend (Render)
 
-### Phase 7: Deployment
+The `render.yaml` deploys the backend as a Docker service. Models are trained at build time inside the container.
 
-#### [NEW] [Dockerfile](file:///home/hp/Documents/web3/backend/Dockerfile)
+```bash
+# Build locally to test
+docker build -f backend/Dockerfile -t bridgecompare-api .
+docker run -p 8000:8000 bridgecompare-api
+```
 
-Python 3.11, FastAPI, uvicorn, trained models baked in.
+### Frontend (Vercel)
 
-#### [NEW] [render.yaml](file:///home/hp/Documents/web3/render.yaml)
+```bash
+cd frontend
+npx vercel --prod
+```
 
-Render deployment config. ML model ships with the Docker image and is retrainable via API.
+Set `NEXT_PUBLIC_API_URL` to your Render backend URL in the Vercel environment settings.
 
----
+## Data Sources
 
-## Research Papers
+| Source | What it provides |
+|--------|-----------------|
+| [Across Protocol API](https://app.across.to/api/deposits) | Real filled deposit history + suggested fees |
+| [LiFi Aggregator](https://li.quest/v1/advanced/routes) | Quotes for CCTP, Stargate V2, CCIP routes |
+| [Etherscan Gas Oracle](https://api.etherscan.io/api?module=gastracker&action=gasoracle) | Current Ethereum gas prices |
+| [CoinGecko](https://api.coingecko.com/api/v3/simple/price) | ETH/USD price |
 
-If XGBoost accuracy is low, these papers propose alternative approaches:
+## License
 
-| Paper | Model(s) | Relevance |
-|-------|----------|-----------|
-| [Blockchain Transaction Fee Forecasting (2023)](https://arxiv.org/abs/2301.13714) | Direct Recursive Hybrid LSTM, CNN-LSTM, Attention LSTM | Gas fee prediction using wavelet denoising + matrix profile. Hybrid models excel for short lookaheads. |
-| [An Empirical Study on Cross-chain Transactions (2025)](https://cczgroup.github.io/) | N/A (empirical) | Foundational cost decomposition across bridges — directly relevant to fee structure understanding. |
-| [Optimizing Cost-Efficient Payment Transactions (2026)](https://www.preprints.org/) | Embedding-based AI routing | AI-driven routing to reduce cross-chain costs via path optimization. |
-| [Ethereum Gas Price Prediction with GBM (2023)](https://doi.org/10.3390/math11092230) | LightGBM, CatBoost | Gradient boosting for Ethereum gas — relevant as gas is major cost component. |
-
----
-
-## Verification Plan
-
-### Automated Tests
-
-1. **Enrichment** — Verify enriched CSV has filled gas/price columns:
-   ```bash
-   python3 backend/enrich_dataset.py && python3 -c "import pandas as pd; df=pd.read_csv('all_ccc_enriched.csv'); print(df[['dune_hourly_gas_gwei','eth_price_at_src']].describe())"
-   ```
-
-2. **Model training** — Train and check R² > 0.5 per bridge:
-   ```bash
-   python3 backend/train_models.py
-   ```
-
-3. **API test** — Backend endpoints return valid JSON:
-   ```bash
-   curl "http://localhost:8000/predict?source_chain=Ethereum&dest_chain=Arbitrum&token=USDC&amount=1000000000"
-   curl "http://localhost:8000/quotes?source_chain=Ethereum&dest_chain=Arbitrum&token=USDC&amount=1000000000"
-   ```
-
-4. **Frontend build** — `npm run build` passes
-
-### Browser Test
-
-5. **E2E** — Select chains, click Compare, verify live quotes + predictions render
+MIT
