@@ -8,7 +8,7 @@
     "std_cost": 5.00236578669637
   },
   "confidence": "low",
-  "last_trained": "2026-03-21T19:46:11.362571+00:00",
+  "last_trained": "2026-03-22T15:11:04.844797+00:00",
   "cost_by_amount_bucket": {
     "0-100": {
       "median": 1.2113643826020837,

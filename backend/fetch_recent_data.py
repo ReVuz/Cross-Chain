@@ -128,36 +128,69 @@ def _ts_features(ts: float) -> dict:
 
 # ── Across: real filled deposits ────────────────────────────────────────────
 
-def fetch_across_deposits(max_pages: int = 20, per_page: int = 100) -> list[dict]:
-    """Fetch filled Across deposits from the last ~30 days."""
+def fetch_across_deposits(max_pages: int = 80, per_page: int = 200) -> list[dict]:
+    """Fetch filled Across deposits from the last ~30 days.
+
+    Uses 'skip' for pagination (the only pagination param the API accepts).
+    """
     log.info("Fetching Across filled deposits...")
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     rows = []
-    offset = 0
+    skip = 0
+    seen_ids: set[str] = set()
 
     for page in range(max_pages):
         try:
-            resp = httpx.get(
-                "https://app.across.to/api/deposits",
-                params={"limit": per_page, "offset": offset},
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                log.warning(f"Across page {page}: HTTP {resp.status_code}")
+            params: dict = {"limit": per_page}
+            if skip > 0:
+                params["skip"] = skip
+
+            resp = None
+            for attempt in range(4):
+                try:
+                    resp = httpx.get(
+                        "https://app.across.to/api/deposits",
+                        params=params,
+                        timeout=45,
+                    )
+                except (httpx.ReadTimeout, httpx.ConnectError) as e:
+                    wait = 8 * (attempt + 1)
+                    log.warning(f"  Connection error, retry in {wait}s: {e}")
+                    time.sleep(wait)
+                    continue
+                if resp.status_code == 429:
+                    wait = 8 * (attempt + 1)
+                    log.info(f"  Rate limited, waiting {wait}s...")
+                    time.sleep(wait)
+                    resp = None
+                    continue
+                break
+
+            if resp is None or resp.status_code != 200:
+                log.warning(f"Across page {page}: HTTP {resp.status_code if resp else 'timeout'}")
                 break
 
             deposits = resp.json()
             if not deposits:
                 break
 
+            reached_cutoff = False
+            new_in_page = 0
+
             for d in deposits:
+                dep_id = d.get("depositTxHash", "") + str(d.get("depositId", ""))
+                if dep_id in seen_ids:
+                    continue
+                seen_ids.add(dep_id)
+
                 ts_str = d.get("depositBlockTimestamp")
                 if not ts_str:
                     continue
                 dep_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+
                 if dep_ts < cutoff:
-                    log.info(f"  Reached cutoff at page {page}, offset {offset}")
-                    return rows
+                    reached_cutoff = True
+                    continue
 
                 if d.get("status") != "filled":
                     continue
@@ -211,14 +244,23 @@ def fetch_across_deposits(max_pages: int = 20, per_page: int = 100) -> list[dict
                 row.update(_ts_features(epoch))
                 _enrich_row(row)
                 rows.append(row)
+                new_in_page += 1
 
-            offset += per_page
-            log.info(f"  Page {page}: {len(deposits)} deposits, {len(rows)} usable rows so far")
-            time.sleep(0.5)
+            skip += per_page
+            log.info(f"  Page {page}: {len(deposits)} deps, +{new_in_page} usable, {len(rows)} total (skip={skip})")
+
+            if reached_cutoff:
+                log.info(f"  Reached 30-day cutoff")
+                break
+            if len(deposits) < per_page:
+                break
+
+            time.sleep(4)
 
         except Exception as e:
             log.error(f"Across page {page} error: {e}")
-            break
+            time.sleep(5)
+            continue
 
     return rows
 
@@ -387,23 +429,28 @@ def append_to_cleaned(rows: list[dict]):
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
+    import sys
+    only = sys.argv[1] if len(sys.argv) > 1 else "all"
+
     log.info("=" * 60)
-    log.info("Fetching Recent Bridge Transaction Data")
+    log.info(f"Fetching Recent Bridge Transaction Data (mode={only})")
     log.info("=" * 60)
 
     _fetch_gas()
     _fetch_eth_price()
-    log.info(f"Market: gas={_gas_cache} gwei, ETH=${_eth_cache}")
+    log.info(f"Market: gas={_gas_cache} gwei, ETH=${_eth_cache}\n")
 
     all_rows: list[dict] = []
 
-    across_rows = fetch_across_deposits()
-    log.info(f"Across: {len(across_rows)} filled deposits")
-    all_rows.extend(across_rows)
+    if only in ("all", "across"):
+        across_rows = fetch_across_deposits()
+        log.info(f"Across: {len(across_rows)} filled deposits")
+        all_rows.extend(across_rows)
 
-    lifi_rows = fetch_lifi_quotes()
-    log.info(f"LiFi quotes: {len(lifi_rows)} data points")
-    all_rows.extend(lifi_rows)
+    if only in ("all", "lifi"):
+        lifi_rows = fetch_lifi_quotes()
+        log.info(f"LiFi quotes: {len(lifi_rows)} data points")
+        all_rows.extend(lifi_rows)
 
     log.info(f"\nTotal new rows: {len(all_rows)}")
 
