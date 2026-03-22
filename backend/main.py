@@ -1,660 +1,422 @@
 """
-BridgeCompare Backend — FastAPI server powering the frontend.
+FastAPI backend — cross-chain bridge cost comparison + ML prediction.
 
 Endpoints:
-  GET  /quotes        — Live bridge fee quotes from protocol APIs
-  GET  /predict       — ML model predictions for transaction cost
-  GET  /data/stats    — Training data statistics for dashboard
-  GET  /data/recent   — Recent transaction rows
-  GET  /model/status  — Model metrics and confidence
-  POST /model/retrain — Retrain all models from latest CSV data
-
-Run:  uvicorn backend.main:app --reload --port 8000
+    GET  /quotes       Live bridge quotes (fee + time + breakdown)
+    GET  /predict      ML predictions per bridge
+    GET  /eda          Pre-computed EDA stats
+    GET  /data/stats   Dataset statistics
+    GET  /data/recent  Recent data rows
+    GET  /model/status Model performance metrics
+    POST /model/retrain  Trigger retraining
 """
 
 import os
-import time
-import asyncio
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
+from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+
+import json as _json
 
 import numpy as np
 import pandas as pd
-import joblib
 import httpx
-from fastapi import FastAPI, Query, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-# ─── Paths ───────────────────────────────────────────────────────────────────
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "cleaned_split_data"
-MODEL_DIR = ROOT / "trained_models"
+class _NumpyEncoder(_json.JSONEncoder):
+    """Handle numpy types that stdlib json chokes on."""
+    def default(self, obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            v = float(obj)
+            if np.isnan(v) or np.isinf(v):
+                return None
+            return v
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
-# ─── App ─────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="BridgeCompare API", version="1.0.0")
+class SafeJSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        return _json.dumps(content, cls=_NumpyEncoder).encode("utf-8")
+
+try:
+    from .bridge_apis import get_all_quotes, CHAIN_IDS
+    from .predictor import BridgePredictor
+    from .data_pipeline import append_quote_row
+except ImportError:
+    from bridge_apis import get_all_quotes, CHAIN_IDS
+    from predictor import BridgePredictor
+    from data_pipeline import append_quote_row
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "cleaned_split_data"
+COLLECTED_DATA = BASE_DIR / "collected_live_data.csv"
+
+CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "30"))
+
+predictor: BridgePredictor | None = None
+_quote_cache: dict = {}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global predictor
+    predictor = BridgePredictor()
+    log.info("BridgeCompare API ready")
+    yield
+
+
+app = FastAPI(
+    title="BridgeCompare API",
+    description="Cross-chain bridge cost comparison and ML prediction",
+    version="1.0.0",
+    lifespan=lifespan,
+    default_response_class=SafeJSONResponse,
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-log = logging.getLogger("uvicorn.error")
 
-# ─── Constants ───────────────────────────────────────────────────────────────
+# ── Health ──────────────────────────────────────────────────────────────────
 
-CHAIN_IDS = {
-    "Ethereum": 1, "Arbitrum": 42161, "Optimism": 10,
-    "Base": 8453, "Polygon": 137,
-}
-
-USDC_ADDRESSES = {
-    1:     "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-    42161: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-    10:    "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
-    8453:  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    137:   "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
-}
-
-USDC_DECIMALS = 6
-
-BRIDGE_FILES = {
-    "across": "across_cleaned.csv",
-    "cctp": "cctp_cleaned.csv",
-    "ccip": "ccip_cleaned.csv",
-    "stargate_bus": "stargate_bus_cleaned.csv",
-    "stargate_oft": "stargate_oft_cleaned.csv",
-}
-
-PROTOCOLS = ["across", "cctp", "stargate_bus", "stargate_oft"]
-
-# ─── Model Cache ─────────────────────────────────────────────────────────────
-
-_model_cache: dict = {}
-_model_load_time: float = 0
+@app.get("/")
+def health():
+    return {"status": "ok", "service": "bridgecompare-api"}
 
 
-def _load_models():
-    global _model_cache, _model_load_time
-    _model_cache = {}
-    for proto in PROTOCOLS:
-        path = MODEL_DIR / f"{proto}_xgboost.joblib"
-        if path.exists():
-            _model_cache[proto] = joblib.load(path)
-    _model_load_time = time.time()
-    log.info(f"Loaded {len(_model_cache)} models: {list(_model_cache.keys())}")
-
-
-@app.on_event("startup")
-async def startup():
-    _load_models()
-
-
-# ─── Quote Cache ─────────────────────────────────────────────────────────────
-
-_quote_cache: dict = {}
-CACHE_TTL = 30  # seconds
-
-
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
-def _chain_id(name: str) -> int:
-    cid = CHAIN_IDS.get(name)
-    if cid is None:
-        raise HTTPException(400, f"Unknown chain: {name}")
-    return cid
-
-
-def _human_amount(raw: str) -> float:
-    return int(raw) / (10 ** USDC_DECIMALS)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# 1. GET /quotes — Live bridge quotes
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def _fetch_across_quote(
-    client: httpx.AsyncClient, src_id: int, dst_id: int, amount_raw: str
-) -> dict | None:
-    try:
-        token = USDC_ADDRESSES.get(src_id)
-        if not token:
-            return None
-        url = "https://app.across.to/api/suggested-fees"
-        params = {
-            "inputToken": token,
-            "outputToken": USDC_ADDRESSES.get(dst_id, token),
-            "originChainId": src_id,
-            "destinationChainId": dst_id,
-            "amount": amount_raw,
-        }
-        r = await client.get(url, params=params, timeout=15)
-        if r.status_code != 200:
-            return None
-        d = r.json()
-        total_fee_pct = float(d.get("totalRelayFee", {}).get("pct", "0")) / 1e18
-        amount_human = _human_amount(amount_raw)
-        fee_usd = amount_human * total_fee_pct
-
-        relay_fee_pct = float(d.get("relayerCapitalFee", {}).get("pct", "0")) / 1e18
-        lp_fee_pct = float(d.get("lpFee", {}).get("pct", "0")) / 1e18
-        relay_gas_pct = float(d.get("relayerGasFee", {}).get("pct", "0")) / 1e18
-
-        return {
-            "protocol": "Across",
-            "normalized_usd_fee": round(fee_usd, 6),
-            "estimated_time_seconds": 15,
-            "fee_breakdown": [
-                {"name": "Relayer Capital Fee", "usd": round(amount_human * relay_fee_pct, 6), "description": "Fee for relayer capital risk"},
-                {"name": "LP Fee", "usd": round(amount_human * lp_fee_pct, 6), "description": "Liquidity provider fee"},
-                {"name": "Relayer Gas Fee", "usd": round(amount_human * relay_gas_pct, 6), "description": "Destination gas paid by relayer"},
-            ],
-        }
-    except Exception as e:
-        log.warning(f"Across quote failed: {e}")
-        return None
-
-
-async def _fetch_debridge_quote(
-    client: httpx.AsyncClient, src_id: int, dst_id: int, amount_raw: str
-) -> dict | None:
-    try:
-        token_src = USDC_ADDRESSES.get(src_id)
-        token_dst = USDC_ADDRESSES.get(dst_id)
-        if not token_src or not token_dst:
-            return None
-        url = "https://deswap.debridge.finance/v1.0/dln/order/quote"
-        params = {
-            "srcChainId": src_id,
-            "srcChainTokenIn": token_src,
-            "srcChainTokenInAmount": amount_raw,
-            "dstChainId": dst_id,
-            "dstChainTokenOut": token_dst,
-            "prependOperatingExpenses": "true",
-        }
-        r = await client.get(url, params=params, timeout=15)
-        if r.status_code != 200:
-            return None
-        d = r.json()
-        est = d.get("estimation", {})
-        dst_amount = int(est.get("dstChainTokenOut", {}).get("amount", "0"))
-        src_amount = int(amount_raw)
-        fee_raw = src_amount - dst_amount
-        fee_usd = fee_raw / (10 ** USDC_DECIMALS)
-
-        costs = est.get("costsDetails", [])
-        breakdown = []
-        for c in costs:
-            breakdown.append({
-                "name": c.get("title", "Fee"),
-                "usd": round(float(c.get("payload", {}).get("feeAmount", "0")) / (10 ** USDC_DECIMALS), 6),
-                "description": c.get("type", ""),
-            })
-
-        return {
-            "protocol": "deBridge",
-            "normalized_usd_fee": round(max(fee_usd, 0), 6),
-            "estimated_time_seconds": 30,
-            "fee_breakdown": breakdown if breakdown else [
-                {"name": "Total Protocol Fee", "usd": round(max(fee_usd, 0), 6), "description": "DLN solver fee"}
-            ],
-        }
-    except Exception as e:
-        log.warning(f"deBridge quote failed: {e}")
-        return None
-
-
-def _estimate_from_history(bridge: str, src_chain: str, dst_chain: str, amount_human: float) -> dict | None:
-    """Estimate fee from historical CSV data when no live API is available."""
-    csv_path = DATA_DIR / BRIDGE_FILES.get(bridge, "")
-    if not csv_path.exists():
-        return None
-    try:
-        df = pd.read_csv(csv_path)
-        route_mask = (
-            (df["src_blockchain"].str.lower() == src_chain.lower()) &
-            (df["dst_blockchain"].str.lower() == dst_chain.lower())
-        )
-        route_df = df[route_mask] if route_mask.any() else df
-
-        if route_df.empty or "user_cost" not in route_df.columns:
-            return None
-
-        recent = route_df.tail(200)
-        valid = recent[recent["user_cost"] > 0]["user_cost"]
-        if valid.empty:
-            return None
-
-        median_cost = float(valid.median())
-        if "amount_usd" in recent.columns:
-            valid_amounts = recent[recent["amount_usd"] > 0]["amount_usd"]
-            if not valid_amounts.empty:
-                median_amount = float(valid_amounts.median())
-                if median_amount > 0:
-                    rate = median_cost / median_amount
-                    median_cost = rate * amount_human
-
-        display_names = {
-            "cctp": "CCTP (Standard)",
-            "ccip": "CCIP",
-            "stargate_bus": "Stargate V2 (Bus)",
-            "stargate_oft": "Stargate V2",
-        }
-
-        estimated_times = {
-            "cctp": 780, "ccip": 900,
-            "stargate_bus": 240, "stargate_oft": 180,
-        }
-
-        return {
-            "protocol": display_names.get(bridge, bridge),
-            "normalized_usd_fee": round(median_cost, 6),
-            "estimated_time_seconds": estimated_times.get(bridge, 300),
-            "fee_breakdown": [
-                {"name": "Estimated Fee", "usd": round(median_cost, 6),
-                 "description": f"Median from {len(valid)} recent transactions"},
-            ],
-        }
-    except Exception as e:
-        log.warning(f"History estimate for {bridge} failed: {e}")
-        return None
-
+# ── Live Quotes ─────────────────────────────────────────────────────────────
 
 @app.get("/quotes")
-async def get_quotes(
+async def quotes(
     source_chain: str = Query(...),
     dest_chain: str = Query(...),
-    token: str = Query("USDC"),
-    amount: str = Query(...),
+    token: str = Query(default="USDC"),
+    amount: str = Query(..., description="Raw token amount (with decimals, e.g. 1000000000 for 1000 USDC)"),
 ):
-    src_id = _chain_id(source_chain)
-    dst_id = _chain_id(dest_chain)
-    if src_id == dst_id:
-        raise HTTPException(400, "Source and destination must differ")
+    if source_chain.lower() not in CHAIN_IDS:
+        raise HTTPException(400, f"Unknown source chain: {source_chain}")
+    if dest_chain.lower() not in CHAIN_IDS:
+        raise HTTPException(400, f"Unknown dest chain: {dest_chain}")
+    try:
+        amount_raw = int(amount)
+    except ValueError:
+        raise HTTPException(400, "amount must be an integer (raw token units)")
 
-    cache_key = f"{src_id}:{dst_id}:{amount}"
-    now = time.time()
-    if cache_key in _quote_cache and (now - _quote_cache[cache_key]["ts"]) < CACHE_TTL:
-        return {"source": "cache", "quotes": _quote_cache[cache_key]["quotes"]}
+    cache_key = f"{source_chain}:{dest_chain}:{token}:{amount}"
+    cached = _quote_cache.get(cache_key)
+    now = datetime.now(timezone.utc)
+    if cached and (now - cached["ts"]).total_seconds() < CACHE_TTL:
+        return {"quotes": cached["quotes"], "source": "cache"}
 
-    amount_human = _human_amount(amount)
+    bridge_quotes = await get_all_quotes(source_chain, dest_chain, token, amount_raw)
+    if not bridge_quotes:
+        raise HTTPException(502, "No quotes returned — bridge APIs may be temporarily unavailable")
 
-    async with httpx.AsyncClient() as client:
-        tasks = [
-            _fetch_across_quote(client, src_id, dst_id, amount),
-            _fetch_debridge_quote(client, src_id, dst_id, amount),
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+    _quote_cache[cache_key] = {"quotes": bridge_quotes, "ts": now}
 
-    quotes = [r for r in results if isinstance(r, dict)]
+    # Persist every live quote for retraining
+    gas_gwei, eth_price = await _fetch_market_data()
+    amount_usd = amount_raw / 1e6
+    for q in bridge_quotes:
+        try:
+            append_quote_row(
+                bridge=q["protocol"],
+                source_chain=source_chain,
+                dest_chain=dest_chain,
+                token=token,
+                amount_usd=amount_usd,
+                fee_usd=q["normalized_usd_fee"],
+                estimated_time=q.get("estimated_time_seconds", 0),
+                gas_gwei=gas_gwei,
+                eth_price=eth_price,
+            )
+        except Exception as e:
+            log.warning(f"Failed to save quote row: {e}")
 
-    for bridge in ["cctp", "ccip", "stargate_bus", "stargate_oft"]:
-        est = _estimate_from_history(bridge, source_chain, dest_chain, amount_human)
-        if est:
-            quotes.append(est)
-
-    if not quotes:
-        raise HTTPException(502, "No bridge quotes available")
-
-    _quote_cache[cache_key] = {"ts": now, "quotes": quotes}
-    return {"source": "live", "quotes": quotes}
+    return {"quotes": bridge_quotes, "source": "live"}
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 2. GET /predict — ML model predictions
-# ═════════════════════════════════════════════════════════════════════════════
+# ── ML Predictions ──────────────────────────────────────────────────────────
 
 @app.get("/predict")
-async def predict_fees(
+async def predict(
     source_chain: str = Query(...),
     dest_chain: str = Query(...),
-    token: str = Query("USDC"),
+    token: str = Query(default="USDC"),
     amount: str = Query(...),
 ):
-    amount_human = _human_amount(amount)
-    route = f"{source_chain}→{dest_chain}"
-    now = datetime.now(timezone.utc)
+    if not predictor:
+        raise HTTPException(503, "Models not loaded yet")
 
-    predictions = []
+    try:
+        amount_raw = int(amount)
+        amount_usd = amount_raw / 1e6
+    except ValueError:
+        raise HTTPException(400, "Invalid amount")
 
-    for bridge, bundle in _model_cache.items():
-        try:
-            model = bundle["model"]
-            feature_cols = bundle["feature_cols"]
-            label_encoders = bundle["label_encoders"]
-            metrics = bundle.get("metrics", {})
+    gas_gwei, eth_price = await _fetch_market_data()
 
-            features = {}
-            for col in feature_cols:
-                if col == "amount_usd":
-                    features[col] = amount_human
-                elif col == "hour_of_day":
-                    features[col] = now.hour
-                elif col == "day_of_week":
-                    features[col] = now.weekday()
-                elif col == "is_weekend":
-                    features[col] = 1 if now.weekday() >= 5 else 0
-                elif col == "month":
-                    features[col] = now.month
-                elif col == "route":
-                    le = label_encoders.get("route")
-                    if le and route in le.classes_:
-                        features[col] = int(le.transform([route])[0])
-                    else:
-                        features[col] = 0
-                elif col == "src_symbol":
-                    le = label_encoders.get("src_symbol")
-                    if le and token in le.classes_:
-                        features[col] = int(le.transform([token])[0])
-                    else:
-                        features[col] = 0
-                else:
-                    features[col] = _get_recent_feature_value(bridge, col)
-
-            X = pd.DataFrame([features])[feature_cols]
-            pred_log = model.predict(X)[0]
-            pred_usd = max(float(np.expm1(pred_log)), 0)
-
-            predictions.append({
-                "bridge": bridge,
-                "predicted_fee_usd": round(pred_usd, 6),
-                "confidence": metrics.get("confidence", "low"),
-                "model_r2": metrics.get("r2_log"),
-                "mae": metrics.get("mae"),
-                "n_samples": bundle.get("trained_on", 0),
-                "prediction_source": "model",
-                "last_trained": bundle.get("trained_at"),
-            })
-
-        except Exception as e:
-            log.warning(f"Prediction failed for {bridge}: {e}")
-
-    # Add recent_median fallback for bridges without models
-    for bridge in PROTOCOLS:
-        if bridge not in _model_cache:
-            med = _get_recent_median(bridge, source_chain, dest_chain, amount_human)
-            if med is not None:
-                predictions.append(med)
+    predictions = predictor.predict(
+        source_chain=source_chain,
+        dest_chain=dest_chain,
+        token=token,
+        amount_usd=amount_usd,
+        gas_gwei=gas_gwei,
+        eth_price=eth_price,
+    )
 
     return {"predictions": predictions}
 
 
-_feature_cache: dict = {}
-_feature_cache_ts: float = 0
-FEATURE_CACHE_TTL = 60
+# ── EDA Stats ───────────────────────────────────────────────────────────────
 
-
-def _get_recent_feature_value(bridge: str, col: str) -> float:
-    """Get the most recent value of a feature column from the CSV (cached)."""
-    global _feature_cache, _feature_cache_ts
-    now = time.time()
-
-    cache_key = f"{bridge}:{col}"
-    if cache_key in _feature_cache and (now - _feature_cache_ts) < FEATURE_CACHE_TTL:
-        return _feature_cache[cache_key]
-
-    csv_path = DATA_DIR / BRIDGE_FILES.get(bridge, "")
-    if not csv_path.exists():
-        return 0
+@app.get("/eda")
+def eda_stats():
+    """Pre-computed EDA statistics for the frontend visualisations."""
+    result = {"bridges": {}}
     try:
-        header = pd.read_csv(csv_path, nrows=0).columns.tolist()
-        if col not in header:
-            return 0
-        df = pd.read_csv(csv_path, usecols=[col])
-        valid = pd.to_numeric(df[col], errors="coerce").dropna()
-        if not valid.empty:
-            val = float(valid.iloc[-1])
-            _feature_cache[cache_key] = val
-            _feature_cache_ts = now
-            return val
-    except Exception:
-        pass
-    return 0
+        for f in sorted(DATA_DIR.glob("*_cleaned.csv")):
+            bridge = f.stem.replace("_cleaned", "")
+            df = pd.read_csv(f)
+
+            cost_desc = df["user_cost"].describe().to_dict() if "user_cost" in df.columns else {}
+
+            fee_decomp = {}
+            for col in ("adjusted_src_fee_usd", "adjusted_dst_fee_usd", "operator_cost"):
+                if col in df.columns:
+                    fee_decomp[col] = round(float(df[col].median()), 6)
+
+            hourly = {}
+            if "hour_of_day" in df.columns and "user_cost" in df.columns:
+                hourly = df.groupby("hour_of_day")["user_cost"].median().round(6).to_dict()
+
+            top_routes = {}
+            if "route" in df.columns:
+                top_routes = df["route"].value_counts().head(5).to_dict()
+
+            amount_vs_cost = {}
+            if "amount_usd" in df.columns and "user_cost" in df.columns:
+                corr = df[["amount_usd", "user_cost"]].corr().iloc[0, 1]
+                if pd.notna(corr):
+                    amount_vs_cost = {"correlation": round(float(corr), 4)}
+
+            def _safe_float(v):
+                f = float(v)
+                if pd.isna(f) or np.isinf(f):
+                    return 0.0
+                return round(f, 6)
+
+            result["bridges"][bridge] = {
+                "n_rows": len(df),
+                "cost_stats": {k: _safe_float(v) for k, v in cost_desc.items()},
+                "fee_decomposition": fee_decomp,
+                "hourly_cost": {str(k): _safe_float(v) for k, v in hourly.items()},
+                "top_routes": top_routes,
+                "amount_cost_corr": amount_vs_cost,
+            }
+    except Exception as e:
+        log.error(f"EDA error: {e}")
+    return result
 
 
-def _get_recent_median(
-    bridge: str, src: str, dst: str, amount: float
-) -> dict | None:
-    csv_path = DATA_DIR / BRIDGE_FILES.get(bridge, "")
-    if not csv_path.exists():
-        return None
-    try:
-        df = pd.read_csv(csv_path)
-        mask = (
-            (df["src_blockchain"].str.lower() == src.lower()) &
-            (df["dst_blockchain"].str.lower() == dst.lower())
-        )
-        subset = df[mask] if mask.any() else df
-        recent = subset.tail(90)
-        valid = recent[recent["user_cost"] > 0]
-        if valid.empty:
-            return None
-        med = float(valid["user_cost"].median())
-        return {
-            "bridge": bridge,
-            "predicted_fee_usd": round(med, 6),
-            "confidence": "medium",
-            "model_r2": None,
-            "mae": None,
-            "n_samples": len(valid),
-            "prediction_source": "recent_median",
-            "last_trained": None,
-        }
-    except Exception:
-        return None
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# 3. GET /data/stats — Training data statistics
-# ═════════════════════════════════════════════════════════════════════════════
+# ── Dataset Stats ───────────────────────────────────────────────────────────
 
 @app.get("/data/stats")
-async def data_stats():
-    bridges = {}
-    total_rows = 0
-    all_timestamps = []
-    all_routes = []
-
-    for bridge, fname in BRIDGE_FILES.items():
-        path = DATA_DIR / fname
-        if not path.exists():
-            continue
-        try:
-            df = pd.read_csv(path)
-            count = len(df)
-            bridges[bridge] = count
-            total_rows += count
-
-            ts_col = pd.to_numeric(df.get("src_timestamp", pd.Series()), errors="coerce").dropna()
-            valid_ts = ts_col[ts_col > 1600000000]
-            if not valid_ts.empty:
-                all_timestamps.extend([valid_ts.min(), valid_ts.max()])
-
-            if "route" in df.columns:
-                all_routes.extend(df["route"].dropna().tolist())
-            elif "src_blockchain" in df.columns and "dst_blockchain" in df.columns:
-                routes = df["src_blockchain"].astype(str) + "→" + df["dst_blockchain"].astype(str)
-                all_routes.extend(routes.tolist())
-        except Exception as e:
-            log.warning(f"Failed to read {fname}: {e}")
-
-    route_counts = pd.Series(all_routes).value_counts().head(10).to_dict()
-
-    total_size = sum(
-        (DATA_DIR / f).stat().st_size for f in BRIDGE_FILES.values() if (DATA_DIR / f).exists()
-    )
-
-    return {
-        "total_rows": total_rows,
-        "seed_rows": total_rows,
+def data_stats():
+    stats = {
+        "total_rows": 0,
+        "seed_rows": 0,
         "collected_rows": 0,
-        "file_size_mb": round(total_size / (1024 * 1024), 2),
-        "oldest_timestamp": int(min(all_timestamps)) if all_timestamps else None,
-        "newest_timestamp": int(max(all_timestamps)) if all_timestamps else None,
-        "bridges": bridges,
-        "top_routes": route_counts,
+        "file_size_mb": "0",
+        "bridges": {},
+        "top_routes": {},
+        "oldest_timestamp": None,
+        "newest_timestamp": None,
     }
 
+    try:
+        all_dfs = []
+        for f in sorted(DATA_DIR.glob("*_cleaned.csv")):
+            df = pd.read_csv(f)
+            bridge = f.stem.replace("_cleaned", "")
+            stats["bridges"][bridge] = len(df)
+            all_dfs.append(df)
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 4. GET /data/recent — Recent data rows
-# ═════════════════════════════════════════════════════════════════════════════
+        if all_dfs:
+            combined = pd.concat(all_dfs, ignore_index=True)
+            stats["total_rows"] = len(combined)
+            stats["seed_rows"] = len(combined)
+
+            total_bytes = sum(f.stat().st_size for f in DATA_DIR.glob("*_cleaned.csv"))
+            stats["file_size_mb"] = f"{total_bytes / (1024 * 1024):.1f}"
+
+            ts_col = "src_timestamp" if "src_timestamp" in combined.columns else None
+            if ts_col:
+                valid = combined[ts_col].dropna()
+                if len(valid):
+                    stats["oldest_timestamp"] = float(valid.min())
+                    stats["newest_timestamp"] = float(valid.max())
+
+            if "route" in combined.columns:
+                stats["top_routes"] = combined["route"].value_counts().head(10).to_dict()
+
+        if COLLECTED_DATA.exists():
+            td = pd.read_csv(COLLECTED_DATA)
+            stats["collected_rows"] = len(td)
+            stats["total_rows"] = stats["seed_rows"] + len(td)
+
+            if len(td) and "src_timestamp" in td.columns:
+                live_ts = td["src_timestamp"].dropna()
+                if len(live_ts):
+                    cur_newest = stats["newest_timestamp"] or 0
+                    stats["newest_timestamp"] = max(cur_newest, float(live_ts.max()))
+
+            if "bridge" in td.columns:
+                for br, cnt in td["bridge"].value_counts().items():
+                    stats["bridges"][br] = stats["bridges"].get(br, 0) + int(cnt)
+    except Exception as e:
+        log.error(f"Stats error: {e}")
+
+    return stats
+
 
 @app.get("/data/recent")
-async def data_recent(
-    limit: int = Query(100, ge=1, le=1000),
-    bridge: str = Query(None),
+def data_recent(
+    limit: int = Query(default=100, le=500),
+    bridge: str = Query(default=None),
 ):
-    frames = []
-    targets = {bridge: BRIDGE_FILES[bridge]} if bridge and bridge in BRIDGE_FILES else BRIDGE_FILES
+    rows = []
+    cols = [
+        "src_timestamp", "bridge", "src_blockchain", "dst_blockchain",
+        "amount_usd", "src_fee_usd", "user_cost", "latency", "source",
+    ]
+    try:
+        frames: list[pd.DataFrame] = []
 
-    for bname, fname in targets.items():
-        path = DATA_DIR / fname
-        if not path.exists():
-            continue
-        try:
-            df = pd.read_csv(path)
-            df["bridge"] = bname
+        # 1) Collected live data — shown first
+        if COLLECTED_DATA.exists():
+            td = pd.read_csv(COLLECTED_DATA)
+            if len(td):
+                td["source"] = "live"
+                if bridge:
+                    td = td[td["bridge"] == bridge]
+                frames.append(td)
+
+        # 2) Historical seed data
+        pattern = f"{bridge}_cleaned.csv" if bridge else "*_cleaned.csv"
+        for f in sorted(DATA_DIR.glob(pattern)):
+            df = pd.read_csv(f)
+            df["source"] = "seed"
             frames.append(df)
-        except Exception:
-            continue
 
-    if not frames:
-        return {"rows": []}
+        if frames:
+            combined = pd.concat(frames, ignore_index=True)
+            if "src_timestamp" in combined.columns:
+                combined = combined.sort_values("src_timestamp", ascending=False)
+            combined = combined.head(limit)
+            available = [c for c in cols if c in combined.columns]
+            rows = combined[available].fillna("").to_dict("records")
+    except Exception as e:
+        log.error(f"Recent data error: {e}")
 
-    combined = pd.concat(frames, ignore_index=True)
-    combined["src_timestamp"] = pd.to_numeric(combined["src_timestamp"], errors="coerce")
-    combined = combined.sort_values("src_timestamp", ascending=False).head(limit)
-
-    cols = ["src_timestamp", "bridge", "src_blockchain", "dst_blockchain",
-            "amount_usd", "src_fee_usd", "user_cost", "latency"]
-    existing = [c for c in cols if c in combined.columns]
-    result = combined[existing].replace({np.nan: None})
-
-    return {"rows": result.to_dict(orient="records")}
+    return {"rows": rows}
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 5. GET /model/status — Model metrics
-# ═════════════════════════════════════════════════════════════════════════════
+# ── Model Management ────────────────────────────────────────────────────────
 
 @app.get("/model/status")
-async def model_status():
-    if not _model_cache:
+def model_status():
+    if not predictor:
         return {"metrics": {}}
 
     metrics = {}
-    for bridge, bundle in _model_cache.items():
-        m = bundle.get("metrics", {})
+    for bridge, meta in predictor.metadata.items():
+        m = meta.get("metrics", {})
         metrics[bridge] = {
-            "r2": m.get("r2_log"),
+            "r2": m.get("r2"),
             "mae": m.get("mae"),
             "rmse": m.get("rmse"),
-            "confidence": m.get("confidence"),
-            "last_trained": bundle.get("trained_at"),
+            "confidence": meta.get("confidence"),
+            "last_trained": meta.get("last_trained"),
+            "model_type": meta.get("model_type"),
+            "n_samples": meta.get("n_samples"),
         }
+
     return {"metrics": metrics}
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 6. POST /model/retrain — Retrain models
-# ═════════════════════════════════════════════════════════════════════════════
-
-_retraining = False
-
-
-def _retrain_sync():
-    global _retraining
-    from sklearn.preprocessing import LabelEncoder
-    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-    from xgboost import XGBRegressor
-
-    numeric_features = [
-        "amount_usd", "dune_hourly_gas_gwei", "gas_1h_lag", "gas_6h_avg",
-        "gas_24h_avg", "gas_volatility_24h", "eth_price_at_src",
-        "eth_price_change_1h", "eth_price_24h_avg", "bridge_hourly_volume",
-        "hour_of_day", "day_of_week", "is_weekend", "month",
-    ]
-    categorical_features = ["route", "src_symbol"]
-    TARGET = "user_cost"
-
-    MODEL_DIR.mkdir(exist_ok=True)
-
-    for proto in PROTOCOLS:
-        path = DATA_DIR / BRIDGE_FILES.get(proto, "")
-        if not path.exists():
-            continue
-
-        df = pd.read_csv(path)
-        df["src_timestamp"] = pd.to_numeric(df["src_timestamp"], errors="coerce")
-        df = df.sort_values("src_timestamp").reset_index(drop=True)
-
-        an = [f for f in numeric_features if f in df.columns]
-        ac = [f for f in categorical_features if f in df.columns]
-        fc = an + ac
-
-        m = df[fc + [TARGET]].copy()
-        les = {}
-        for c in ac:
-            le = LabelEncoder()
-            m[c] = le.fit_transform(m[c].astype(str))
-            les[c] = le
-
-        m = m.replace([np.inf, -np.inf], np.nan).dropna()
-        m = m[m[TARGET] > 0]
-        m["log_target"] = np.log1p(m[TARGET])
-
-        if len(m) < 50:
-            continue
-
-        si = int(len(m) * 0.8)
-        xgb = XGBRegressor(
-            n_estimators=500, max_depth=6, learning_rate=0.03,
-            subsample=0.8, colsample_bytree=0.8, reg_alpha=0.1, reg_lambda=1.0,
-            random_state=42, verbosity=0,
-        )
-        xgb.fit(m.iloc[:si][fc], m.iloc[:si]["log_target"])
-
-        yp = xgb.predict(m.iloc[si:][fc])
-        yr = np.maximum(np.expm1(yp), 0)
-        mae = mean_absolute_error(m.iloc[si:][TARGET], yr)
-        rmse = float(np.sqrt(mean_squared_error(m.iloc[si:][TARGET], yr)))
-        r2 = r2_score(m.iloc[si:]["log_target"], yp)
-        conf = "high" if r2 > 0.7 else "medium" if r2 > 0.4 else "low"
-
-        bundle = {
-            "model": xgb, "feature_cols": fc, "label_encoders": les,
-            "trained_on": len(m),
-            "last_timestamp": int(df["src_timestamp"].max()),
-            "metrics": {"mae": mae, "rmse": rmse, "r2_log": r2, "confidence": conf},
-            "trained_at": datetime.now(timezone.utc).isoformat(),
-        }
-        joblib.dump(bundle, MODEL_DIR / f"{proto}_xgboost.joblib")
-        log.info(f"Retrained {proto}: R²={r2:.4f}, MAE=${mae:.4f}")
-
-    _load_models()
-    _retraining = False
-
-
 @app.post("/model/retrain")
-async def retrain_models(background_tasks: BackgroundTasks):
-    global _retraining
-    if _retraining:
-        raise HTTPException(409, "Retraining already in progress")
-    _retraining = True
-    background_tasks.add_task(_retrain_sync)
-    return {"status": "retraining_started"}
+async def retrain_model():
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["python", "-m", "backend.train_models"],
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            raise HTTPException(500, f"Training failed: {result.stderr[-500:]}")
+
+        if predictor:
+            predictor.reload_models()
+
+        return {"status": "ok", "message": "Models retrained successfully"}
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "Training timed out (5 min limit)")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
-# ─── Health ──────────────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────────
 
-@app.get("/health")
-async def health():
-    return {
-        "status": "ok",
-        "models_loaded": len(_model_cache),
-        "data_files": sum(1 for f in BRIDGE_FILES.values() if (DATA_DIR / f).exists()),
-    }
+async def _fetch_market_data() -> tuple[float | None, float | None]:
+    """Fetch real-time gas price (gwei) and ETH price (USD)."""
+    gas_gwei = None
+    eth_price = None
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            key = os.getenv("ETHERSCAN_API_KEY", "")
+            url = "https://api.etherscan.io/api?module=gastracker&action=gasoracle"
+            if key:
+                url += f"&apikey={key}"
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "1":
+                    gas_gwei = float(data["result"].get("ProposeGasPrice", 15))
+        except Exception as e:
+            log.warning(f"Gas fetch failed: {e}")
+
+        try:
+            resp = await client.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": "ethereum", "vs_currencies": "usd"},
+            )
+            if resp.status_code == 200:
+                eth_price = resp.json().get("ethereum", {}).get("usd")
+        except Exception as e:
+            log.warning(f"ETH price fetch failed: {e}")
+
+    return gas_gwei, eth_price

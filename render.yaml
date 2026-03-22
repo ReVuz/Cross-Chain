@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: bridgecompare-api
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: CACHE_TTL_SECONDS
+        value: "30"
+      - key: ETHERSCAN_API_KEY
+        sync: false
+    healthCheckPath: /
+    autoDeploy: true

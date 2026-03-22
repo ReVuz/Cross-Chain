@@ -1,0 +1,34 @@
+{
+  "bridge": "ccip",
+  "model_type": "median_fallback",
+  "n_samples": 11,
+  "metrics": {
+    "median_cost": 1.0759830311806236,
+    "mean_cost": 3.362625158676596,
+    "std_cost": 5.00236578669637
+  },
+  "confidence": "low",
+  "last_trained": "2026-03-21T19:46:11.362571+00:00",
+  "cost_by_amount_bucket": {
+    "0-100": {
+      "median": 1.2113643826020837,
+      "count": 1
+    },
+    "100-1000": {
+      "median": 0.3933972815594082,
+      "count": 3
+    },
+    "1000-10000": {
+      "median": 0.753207875415272,
+      "count": 4
+    },
+    "10000-100000": {
+      "median": 9.6027681228712,
+      "count": 1
+    },
+    "100000-inf": {
+      "median": 8.945587300656074,
+      "count": 2
+    }
+  }
+}

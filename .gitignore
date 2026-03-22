@@ -37,3 +37,4 @@ frontend/out/
 # Large data files
 *.csv
 !cleaned_split_data/*.csv
+collected_live_data.csv

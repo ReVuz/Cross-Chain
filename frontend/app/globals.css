@@ -835,11 +835,32 @@ select.input-field {
   text-transform: capitalize;
 }
 
+.source-tag {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 100px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.source-live {
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
+}
+
+.source-seed {
+  background: rgba(122, 170, 206, 0.12);
+  color: var(--color-text-muted);
+}
+
 .bridge-tag.across { background: #dbeafe; color: #2563eb; }
 .bridge-tag.cctp { background: #fce7f3; color: #db2777; }
 .bridge-tag.ccip { background: #d1fae5; color: #059669; }
 .bridge-tag.stargate_oft,
 .bridge-tag.stargate_bus { background: #ede9fe; color: #7c3aed; }
+.bridge-tag.debridge { background: #fef3c7; color: #d97706; }
 
 .retrain-btn {
   font-family: inherit;

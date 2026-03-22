@@ -245,6 +245,7 @@ export default function DataPage() {
                 <thead>
                   <tr>
                     <th>Timestamp</th>
+                    <th>Source</th>
                     <th>Bridge</th>
                     <th>Route</th>
                     <th>Amount (USD)</th>
@@ -256,7 +257,7 @@ export default function DataPage() {
                 <tbody>
                   {rows.length === 0 ? (
                     <tr>
-                      <td colSpan={7} style={{ textAlign: "center", padding: 40, color: "var(--color-text-muted)" }}>
+                      <td colSpan={8} style={{ textAlign: "center", padding: 40, color: "var(--color-text-muted)" }}>
                         No data rows found.
                       </td>
                     </tr>
@@ -264,6 +265,11 @@ export default function DataPage() {
                     rows.map((r, i) => (
                       <tr key={i}>
                         <td>{ts(r.src_timestamp)}</td>
+                        <td>
+                          <span className={`source-tag ${r.source === "live" ? "source-live" : "source-seed"}`}>
+                            {r.source === "live" ? "Live" : "Seed"}
+                          </span>
+                        </td>
                         <td>
                           <span className={`bridge-tag ${r.bridge}`}>{r.bridge}</span>
                         </td>
