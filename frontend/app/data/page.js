@@ -31,7 +31,6 @@ export default function DataPage() {
   const [bridge, setBridge] = useState("all");
   const [loading, setLoading] = useState(true);
   const [modelInfo, setModelInfo] = useState(null);
-  const [retraining, setRetraining] = useState(false);
   const [error, setError] = useState(null);
 
   const fetchData = useCallback(async () => {
@@ -56,19 +55,6 @@ export default function DataPage() {
   }, [bridge]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
-
-  async function handleRetrain() {
-    setRetraining(true);
-    try {
-      const res = await fetch(`${API}/model/retrain`, { method: "POST" });
-      if (!res.ok) throw new Error("Retrain failed");
-      await fetchData();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setRetraining(false);
-    }
-  }
 
   const maxBridge = stats
     ? Math.max(...Object.values(stats.bridges || {}))
@@ -151,13 +137,6 @@ export default function DataPage() {
             <div className="data-section">
               <div className="section-head">
                 <h2>Model Performance</h2>
-                <button
-                  className="retrain-btn"
-                  onClick={handleRetrain}
-                  disabled={retraining}
-                >
-                  {retraining ? "Retraining..." : "Retrain Now"}
-                </button>
               </div>
               <div className="model-cards">
                 {Object.entries(modelInfo.metrics).map(([name, m]) => (

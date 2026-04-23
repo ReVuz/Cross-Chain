@@ -13,6 +13,7 @@ export default function RootLayout({ children }) {
         <nav className="top-nav">
           <Link href="/" className="nav-link">Bridge Compare</Link>
           <Link href="/data" className="nav-link">Training Data</Link>
+          <Link href="/how-it-works" className="nav-link">How It Works</Link>
         </nav>
         {children}
       </body>
