@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 const SECTIONS = [
   { id: "overview", label: "Overview" },
@@ -14,23 +14,99 @@ const SECTIONS = [
   // { id: "references", label: "References" },
 ];
 
-function Figure({ src, alt, caption }) {
-  const [loaded, setLoaded] = useState(false);
+function ZoomModal({ src, alt, caption, onClose }) {
+  const [zoomed, setZoomed] = useState(false);
+
+  const handleKeyDown = useCallback(
+    (e) => {
+      if (e.key === "Escape") onClose();
+    },
+    [onClose]
+  );
+
+  useEffect(() => {
+    document.addEventListener("keydown", handleKeyDown);
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = "";
+    };
+  }, [handleKeyDown]);
+
   return (
-    <figure className="doc-figure">
-      <div className={`doc-figure-frame ${loaded ? "loaded" : ""}`}>
+    <div className="zoom-overlay" onClick={onClose}>
+      <button className="zoom-close-btn" onClick={onClose} aria-label="Close zoom">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+      <div
+        className={`zoom-image-container ${zoomed ? "zoomed-in" : ""}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          setZoomed((z) => !z);
+        }}
+      >
         <Image
           src={src}
           alt={alt}
-          width={1400}
-          height={900}
-          className="doc-figure-img"
-          onLoad={() => setLoaded(true)}
-          sizes="(max-width: 900px) 100vw, 900px"
+          width={2800}
+          height={1800}
+          className="zoom-image"
+          sizes="100vw"
+          quality={95}
+          priority
         />
       </div>
-      {caption && <figcaption className="doc-figure-caption">{caption}</figcaption>}
-    </figure>
+      {caption && !zoomed && (
+        <div className="zoom-caption" onClick={(e) => e.stopPropagation()}>
+          {caption}
+        </div>
+      )}
+      <div className="zoom-hint">
+        {zoomed ? "Click to fit • Esc to close" : "Click to zoom in • Esc to close"}
+      </div>
+    </div>
+  );
+}
+
+function Figure({ src, alt, caption }) {
+  const [loaded, setLoaded] = useState(false);
+  const [showZoom, setShowZoom] = useState(false);
+  return (
+    <>
+      <figure className="doc-figure" onClick={() => setShowZoom(true)}>
+        <div className={`doc-figure-frame clickable ${loaded ? "loaded" : ""}`}>
+          <Image
+            src={src}
+            alt={alt}
+            width={1400}
+            height={900}
+            className="doc-figure-img"
+            onLoad={() => setLoaded(true)}
+            sizes="(max-width: 900px) 100vw, 900px"
+          />
+          <div className="zoom-icon-hint">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="11" cy="11" r="8" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              <line x1="11" y1="8" x2="11" y2="14" />
+              <line x1="8" y1="11" x2="14" y2="11" />
+            </svg>
+          </div>
+        </div>
+        {caption && <figcaption className="doc-figure-caption">{caption}</figcaption>}
+      </figure>
+      {showZoom && (
+        <ZoomModal
+          src={src}
+          alt={alt}
+          caption={caption}
+          onClose={() => setShowZoom(false)}
+        />
+      )}
+    </>
   );
 }
 

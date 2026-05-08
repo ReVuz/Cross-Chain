@@ -1185,6 +1185,147 @@ select.input-field {
   font-style: italic;
 }
 
+/* Clickable figure cursor */
+.doc-figure-frame.clickable {
+  cursor: zoom-in;
+  position: relative;
+}
+
+/* Zoom icon hint on hover */
+.zoom-icon-hint {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  border-radius: 8px;
+  color: #fff;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 0.25s, transform 0.25s;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.doc-figure-frame.clickable:hover .zoom-icon-hint {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* ── Zoom overlay / lightbox ── */
+.zoom-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.88);
+  backdrop-filter: blur(16px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  animation: zoom-fade-in 0.25s ease-out;
+}
+
+@keyframes zoom-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.zoom-close-btn {
+  position: absolute;
+  top: 16px;
+  right: 20px;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.2s;
+  z-index: 10;
+}
+
+.zoom-close-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: scale(1.08);
+}
+
+.zoom-image-container {
+  max-width: 92vw;
+  max-height: 82vh;
+  overflow: hidden;
+  border-radius: 10px;
+  cursor: zoom-in;
+  transition: max-width 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+              max-height 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: zoom-img-enter 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes zoom-img-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.zoom-image-container.zoomed-in {
+  max-width: none;
+  max-height: none;
+  overflow: auto;
+  cursor: zoom-out;
+  border-radius: 0;
+}
+
+.zoom-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+}
+
+.zoom-image-container.zoomed-in .zoom-image {
+  width: auto;
+  max-width: none;
+}
+
+.zoom-caption {
+  margin-top: 14px;
+  max-width: 720px;
+  text-align: center;
+  font-size: 0.85rem;
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.6);
+  line-height: 1.55;
+  padding: 0 24px;
+}
+
+.zoom-hint {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+
 /* Callouts */
 .doc-callout {
   margin: 20px 0;
