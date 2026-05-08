@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
 
 const SECTIONS = [
   { id: "overview", label: "Overview" },
@@ -458,24 +459,11 @@ export default function HowItWorksPage() {
               <p>Oracle-secured cross-chain messaging with defense-in-depth. Institutional-grade but higher premium.</p>
             </div>
           </div>
-
-          <Figure
-            src="/docs/stargate_latency_analysis.png"
-            alt="Box plot of Stargate transfer latency by route"
-            caption="Figure 8 — Stargate latency analysis. The long upper tail on bus transfers reflects batching delay and motivates modeling OFT and Bus as separate bridges."
-          />
-
-          <Figure
-            src="/docs/across_variable_proof.png"
-            alt="Scatter showing Across fee varying with amount and gas"
-            caption="Figure 9 — Empirical evidence that Across fees genuinely depend on transfer size and gas conditions (not flat pricing), justifying per-bridge ML."
-          />
-
-          <Figure
-            src="/docs/cost_evolution_analysis.png"
-            alt="Time series of average bridge fees over several months"
-            caption="Figure 10 — Fee evolution over time. Shifting levels motivate the retraining endpoint and the &quot;recent median&quot; fallback used for routes with very fresh data."
-          />
+          <Link
+            href="https://www.overleaf.com/project/6878d699512ef0755d621011"
+            className="text-blue-500 hover:text-blue-400 underline transition-colors">
+            Read the full paper →
+          </Link>
         </section>
 
         {/* References */}
