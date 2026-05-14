@@ -461,7 +461,9 @@ export default function HowItWorksPage() {
           </div>
           <Link
             href="https://www.overleaf.com/project/6878d699512ef0755d621011"
-            className="text-blue-500 hover:text-blue-400 underline transition-colors">
+            className="paper-link"
+            target="_blank"
+            rel="noreferrer">
             Read the full paper →
           </Link>
         </section>

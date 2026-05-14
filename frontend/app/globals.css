@@ -1053,6 +1053,7 @@ select.input-field {
 
 .docs-main {
   min-width: 0;
+  overflow-x: hidden;
 }
 
 .docs-header {
@@ -1165,6 +1166,7 @@ select.input-field {
 
 .doc-figure-img {
   width: 100%;
+  max-width: 100%;
   height: auto;
   display: block;
   border-radius: 6px;
@@ -1466,7 +1468,8 @@ select.input-field {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  overflow: auto;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .perf-table {
@@ -1577,6 +1580,25 @@ select.input-field {
   line-height: 1.5;
 }
 
+.paper-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--color-accent-dark);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--color-accent);
+  transition: color 0.2s, text-decoration-color 0.2s;
+  margin-top: 8px;
+}
+
+.paper-link:hover {
+  color: var(--color-accent);
+  text-decoration-color: var(--color-accent-dark);
+}
+
 .docs-footer {
   margin-top: 60px;
   padding-top: 24px;
@@ -1586,41 +1608,163 @@ select.input-field {
   text-align: center;
 }
 
+/* ══════════════════════════════════════════════
+   Responsive — How It Works / Docs Page
+   ══════════════════════════════════════════════ */
+
+/* ── Tablet (≤ 900px) ── */
 @media (max-width: 900px) {
   .docs-container {
     grid-template-columns: 1fr;
-    gap: 24px;
+    gap: 0;
+    padding: 24px 20px 80px;
   }
+
   .docs-sidebar {
-    position: static;
+    position: sticky;
+    top: 52px;
     order: -1;
+    z-index: 50;
+    background: var(--color-bg-main);
+    margin: 0 -20px;
+    padding: 0 20px;
   }
+
   .docs-sidebar-inner {
     border-right: none;
     border-bottom: 1px solid var(--color-border);
-    padding: 0 0 16px;
+    padding: 12px 0;
+    padding-right: 0;
   }
+
+  .docs-sidebar-label {
+    display: none;
+  }
+
   .docs-toc {
     flex-direction: row;
     overflow-x: auto;
-    gap: 6px;
+    gap: 4px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    padding-bottom: 2px;
   }
+
+  .docs-toc::-webkit-scrollbar {
+    display: none;
+  }
+
   .docs-toc-link {
     white-space: nowrap;
     border-left: none;
     border-bottom: 2px solid transparent;
+    padding: 6px 12px;
+    font-size: 0.82rem;
+    flex-shrink: 0;
   }
+
   .docs-toc-link:hover {
     border-left: none;
     border-bottom-color: var(--color-accent);
   }
+
+  .docs-header {
+    margin-bottom: 36px;
+    padding-bottom: 24px;
+  }
+
   .docs-header h1 {
     font-size: 2rem;
   }
+
+  .docs-subtitle {
+    font-size: 1rem;
+  }
+
+  .docs-section {
+    margin-bottom: 48px;
+  }
+
+  .docs-section h2 {
+    font-size: 1.4rem;
+  }
+
+  /* Grids: 2 columns at tablet */
+  .method-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+
+  .feature-cats {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+
+  .bridge-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+
+  .doc-sources {
+    grid-template-columns: 1fr;
+  }
+
+  /* Performance table */
+  .perf-table-wrap {
+    margin: 14px -8px;
+    border-radius: var(--radius-sm);
+  }
+
+  .perf-table {
+    font-size: 0.82rem;
+  }
+
+  .perf-table th,
+  .perf-table td {
+    padding: 10px 12px;
+  }
+
+  /* Figures */
+  .doc-figure-frame {
+    padding: 10px;
+  }
+
+  /* Stat chips */
+  .stat-row {
+    gap: 8px;
+  }
+
+  .stat-chip {
+    padding: 8px 14px;
+    font-size: 0.75rem;
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .stat-chip span {
+    font-size: 0.9rem;
+  }
+
+  /* Callouts */
+  .doc-callout {
+    padding: 12px 14px;
+  }
+
+  /* Top nav */
+  .top-nav {
+    gap: 16px;
+    padding: 12px 20px;
+  }
+
+  .nav-link {
+    font-size: 0.82rem;
+  }
 }
 
-/* ── Responsive ── */
+/* ── Mobile (≤ 768px) ── */
 @media (max-width: 768px) {
+  /* Main page */
   .header h1 {
     font-size: 2.5rem;
   }
@@ -1645,6 +1789,342 @@ select.input-field {
   }
   .fee-breakdown-items {
     grid-template-columns: 1fr;
+  }
+
+  /* How-it-works / docs page */
+  .docs-container {
+    padding: 16px 16px 64px;
+  }
+
+  .docs-sidebar {
+    margin: 0 -16px;
+    padding: 0 16px;
+    top: 48px;
+  }
+
+  .docs-header h1 {
+    font-size: 1.65rem;
+    letter-spacing: -0.03em;
+  }
+
+  .docs-subtitle {
+    font-size: 0.92rem;
+    line-height: 1.5;
+  }
+
+  .docs-section {
+    margin-bottom: 40px;
+    scroll-margin-top: 120px;
+  }
+
+  .docs-section h2 {
+    font-size: 1.25rem;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+  }
+
+  .docs-section h3 {
+    font-size: 1rem;
+    margin: 20px 0 10px;
+  }
+
+  .docs-section p {
+    font-size: 0.92rem;
+    line-height: 1.6;
+  }
+
+  .docs-list li {
+    font-size: 0.92rem;
+    line-height: 1.6;
+    margin-bottom: 8px;
+  }
+
+  /* All grids stack to single column */
+  .method-grid,
+  .feature-cats,
+  .bridge-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .method-card {
+    padding: 14px;
+  }
+
+  .method-card p {
+    font-size: 0.82rem;
+  }
+
+  .feature-cat {
+    padding: 14px;
+  }
+
+  .bridge-info {
+    padding: 14px;
+  }
+
+  /* Stat chips: 2 columns on mobile */
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+
+  .stat-chip {
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    min-width: 0;
+  }
+
+  /* Figures — minimal padding on mobile */
+  .doc-figure {
+    margin: 16px 0 20px;
+  }
+
+  .doc-figure-frame {
+    padding: 8px;
+    border-radius: var(--radius-sm);
+  }
+
+  .doc-figure-caption {
+    font-size: 0.78rem;
+    padding: 0 2px;
+  }
+
+  /* Performance table */
+  .perf-table-wrap {
+    margin: 12px -4px;
+  }
+
+  .perf-table {
+    font-size: 0.78rem;
+  }
+
+  .perf-table th,
+  .perf-table td {
+    padding: 8px 10px;
+    white-space: nowrap;
+  }
+
+  /* Callouts */
+  .doc-callout {
+    padding: 10px 12px;
+    margin: 14px 0;
+  }
+
+  .doc-callout-title {
+    font-size: 0.72rem;
+  }
+
+  .doc-callout-body {
+    font-size: 0.85rem;
+  }
+
+  /* Zoom modal */
+  .zoom-image-container {
+    max-width: 98vw;
+    max-height: 78vh;
+    border-radius: 6px;
+  }
+
+  .zoom-close-btn {
+    top: 10px;
+    right: 12px;
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+  }
+
+  .zoom-caption {
+    font-size: 0.78rem;
+    padding: 0 16px;
+    max-width: 100%;
+  }
+
+  .zoom-hint {
+    font-size: 0.65rem;
+    bottom: 12px;
+  }
+
+  /* Overleaf link */
+  .docs-section a[href*="overleaf"] {
+    display: inline-block;
+    font-size: 0.88rem;
+    word-break: break-all;
+  }
+
+  /* Footer */
+  .docs-footer {
+    margin-top: 40px;
+    padding-top: 20px;
+    font-size: 0.8rem;
+  }
+
+  /* Top nav compact */
+  .top-nav {
+    gap: 12px;
+    padding: 10px 16px;
+  }
+
+  .nav-link {
+    font-size: 0.78rem;
+  }
+}
+
+/* ── Small phone (≤ 480px) ── */
+@media (max-width: 480px) {
+  .docs-container {
+    padding: 12px 12px 48px;
+  }
+
+  .docs-sidebar {
+    margin: 0 -12px;
+    padding: 0 12px;
+    top: 44px;
+  }
+
+  .docs-sidebar-inner {
+    padding: 8px 0;
+  }
+
+  .docs-toc-link {
+    font-size: 0.75rem;
+    padding: 5px 10px;
+  }
+
+  .docs-header {
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+  }
+
+  .docs-header h1 {
+    font-size: 1.4rem;
+    letter-spacing: -0.02em;
+  }
+
+  .docs-subtitle {
+    font-size: 0.85rem;
+  }
+
+  .docs-section {
+    margin-bottom: 32px;
+    scroll-margin-top: 110px;
+  }
+
+  .docs-section h2 {
+    font-size: 1.1rem;
+  }
+
+  .docs-section p,
+  .docs-list li {
+    font-size: 0.88rem;
+  }
+
+  .docs-section code {
+    font-size: 0.78em;
+    padding: 1px 4px;
+  }
+
+  /* Stat chips: stack to single column on tiny screens */
+  .stat-row {
+    grid-template-columns: 1fr;
+  }
+
+  .stat-chip {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+  }
+
+  .stat-chip span {
+    font-size: 0.88rem;
+    margin-bottom: 0;
+  }
+
+  /* Method / feature / bridge cards */
+  .method-card,
+  .feature-cat,
+  .bridge-info {
+    padding: 12px;
+  }
+
+  .method-card h4,
+  .feature-cat h4,
+  .bridge-info h4 {
+    font-size: 0.88rem;
+  }
+
+  /* Figures — edge-to-edge on tiny screens */
+  .doc-figure {
+    margin: 12px -4px 16px;
+  }
+
+  .doc-figure-frame {
+    padding: 6px;
+    border-radius: 4px;
+  }
+
+  .doc-figure-caption {
+    font-size: 0.72rem;
+    line-height: 1.45;
+  }
+
+  /* Performance table */
+  .perf-table {
+    font-size: 0.72rem;
+  }
+
+  .perf-table th,
+  .perf-table td {
+    padding: 6px 8px;
+  }
+
+  /* Zoom — full-screen on phone */
+  .zoom-image-container {
+    max-width: 100vw;
+    max-height: 75vh;
+    border-radius: 0;
+  }
+
+  .zoom-close-btn {
+    top: 8px;
+    right: 8px;
+    width: 34px;
+    height: 34px;
+  }
+
+  .zoom-caption {
+    font-size: 0.72rem;
+    margin-top: 8px;
+  }
+
+  /* Callout */
+  .doc-callout {
+    padding: 10px;
+    border-radius: var(--radius-sm);
+  }
+
+  /* Docs footer */
+  .docs-footer {
+    font-size: 0.75rem;
+    margin-top: 28px;
+    padding-top: 16px;
+  }
+
+  /* Top nav */
+  .top-nav {
+    gap: 8px;
+    padding: 8px 12px;
+  }
+
+  .nav-link {
+    font-size: 0.72rem;
+  }
+
+  /* Main page header */
+  .header h1 {
+    font-size: 2rem;
   }
 }
 
